@@ -86,6 +86,7 @@ def filter_exitrons(work_dir, ccds_gtf, introns_bed, junction_map, genome_fasta)
 	for t_id in ccds: ccds[t_id]['exons'].sort(key=lambda x: x[0])
 
 	with open('{}exitrons_CCDS_map.txt'.format(work_dir), 'w') as map_out:
+		map_out.write( '#CHR\tEXITRON_START\tEXITRON_END\tTRANSCRIPT_ID\tCCDS_START\tCCDS_END\tIS_ANNOTATED\tMOD3\n' )
 		for line in open(junction_map):
 			if not line.startswith('#'):
 				c, j_start, j_end, t_id, c_start, c_end = line.rstrip().split('\t')
@@ -178,6 +179,82 @@ def prepare_bam_files(work_dir, bam_file, handle, genome_fasta):
 	# Remove sam
 	subprocess.call("rm -f %s" % (uniq_exon_reads_bam.replace('.bam', '.sam')), shell=True)
 
+def calculate_PSI(work_dir, exitron_map, uniq_reads, uniq_exonic, handle):
+	''' Calculate exitron PSI values, based on the coverage of the 
+	unique exonic reads. 
+						
+						A		   B		 C
+					   ----		  ----		----
+	EEEEEEEEEEEEEEEEEEEEEXXXXXXXXXXXXXXXXXXXXXEEEEEEEEEEEEEEEEEEEEE
+					   --	                  --
+						 \                   / 
+						  \        D        / 							
+                           -----------------
+                           	
+    E = exon, X = exitron
+    A = Reads aligning from -10 to +10 around exitron 5'SS
+    B = Reads aligning from -10 to +10 around exitron middle point
+    C = Reads aligning from -10 to +10 around exitron 3'SS
+    D = Reads supporting exitron splicing, output from get_junction_uniq_read_support()
+    
+    PSI = ( ((A+B+C)/3) / ((A+B+C)/3) + D ) * 100 '''
+
+    import re
+
+    # Get junction support
+    rc, info = {}, {}
+    for line in open(exitron_map):
+    	if not line.startswith('#'):
+
+    		# CHR, EXITRON_START, EXITRON_END, TRANSCRIPT_ID, CCDS_START, CCDS_END, IS_ANNOTATED, MOD3
+    		c, s, e, strand, t_id, ccds_start, ccds_end, is_annotated, mod3 = line.rstrip().split('\t')
+    		info['{}:{}-{}'.format(c, s, e)] = { 'strand': strand, 't_id': t_id, 'is_annotated': is_annotated, 'mod3': mod3 }
+
+    		subprocess.call("samtools view {0}{1} {2}:{3}-{4} > {0}tmp.sam".format(work_dir, uniq_reads, c, s, e), shell=True)
+    		N = "{}N".format(int(e)-int(s)) # Get the required read/junction gap signature
+
+    		uniq_count = 0
+    		for aln in open("{}tmp.sam".format(work_dir)):
+    			qname = aln.split('\t')[0]
+    			pos = int(aln.split('\t')[3])
+    			cigar = aln.split('\t')[5]
+    			start = (pos + int(re.search('^[0-9]+)M', cigar).group(1))) - 1
+
+    			# Check if the junction is at the correct position
+    			# and if the junction size is correct
+    			if N in cigar and start == int(s): uniq_count += 1
+
+    		rc['{}:{}-{}'.format(c, s, e)+1] = { 'A': 0, 'B': 0, 'C': 0, 'D': uniq_count }
+
+    # Get A, B, C read support
+    with open("{}tmp_coverageBed_input.bed", 'w') as fout:
+    	for line in open(exitron_map):
+    		if not line.startswith('#'):
+
+				c, s, e, strand, t_id, ccds_start, ccds_end, is_annotated, mod3 = line.rstrip().split('\t')
+				s, e = int(s), int(e)
+				middle_point = int(s + ((e-s)/2))
+				locus = '{}:{}-{}'.format(c, s, e+1)
+
+				fout.write( '{}\t{}\t{}\t{}_A\n'.format(c, s-10, s+10, locus) )
+				fout.write( '{}\t{}\t{}\t{}_B\n'.format(c, middle_point-10, middle_point+10, locus) )
+				fout.write( '{}\t{}\t{}\t{}_C\n'.format(c, e-10, e+10, locus) )
+
+	subprocess.call("sort -k1,1 -k2,2n {0}tmp_coveragebed_input.bed > {0}tmp_coverageBed_input.sorted.bed".format(work_dir), shell=True)
+	subprocess.call("coverageBed -sorted -counts -a {0}tmp_coverageBed_input.sorted.bed -b {0}{1} > {0}tmp_coverageBed_output.bed".format(work_dir, uniq_exonic), shell=True)
+	for line in open("{}tmp_coverageBed_output.bed".format(work_dir)):
+		c, start, end, locus, coverage = line.rstrip().split('\t')
+		locus, letter = locus.split('_')
+		rc[locus][letter] = int(coverage)
+
+	# Calculate PSI
+	with open("{}{}.PSI".format(work_dir, handle), 'w') as fout: 
+		for x in natsorted(rc):
+			try: PSI = ( ( ( rc[x]['A'] + rc[x]['B'] + rc[x]['C'] ) / 3 ) / ( ( ( rc[x]['A'] + rc[x]['B'] + rc[x]['C'] ) / 3 ) + rc[x]['D'] ) ) * 100
+			except ZeroDivisionError: PSI = 'NA'
+			fout.write( '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(x, info[x]['t_id'], info[x]['strand'], info[x]['is_annotated'], info[x]['mod3'], rc[x]['A'], rc[x]['B'], rc[x]['C'], rc[x]['D'], PSI) )
+
+
 if __name__ == '__main__':
 
 	parser = argparse.ArgumentParser(description=__doc__)
@@ -203,7 +280,17 @@ if __name__ == '__main__':
 	parser_c.add_argument('-f', '--file-handle', required=True, help="Unique file handle. The output files will be [work_dir]/accepted_hits_uniq_reads.[file-handle].bam and [work-dir]/accepted_hits_uniq_exonic_reads.[file-handle].bam.")
 	parser_c.add_argument('-g', '--genome-fasta', required=True, help="Genome fasta.")
 
+	parser_d = subparsers.add_parser('calculate-PSI', help="Calculate the exitron PSI.")
+	parser_d.add_argument('--exitron-map', required=True, help="Exitron mapping file (from filter-exitrons).")
+	parser_d.add_argument('--uniq-reads', required=True, help="Unique reads bam file (from prepare-bam).")
+	parser_d.add_argument('--uniq-exonic', required=True, help="Unique exonic reads bam file (from prepare-bam).")
+	parser_d.add_argument('-f', '--file-handle', required=True, help="Unique file handle. The output files will be [work_dir]/accepted_hits_uniq_reads.[file-handle].bam and [work-dir]/accepted_hits_uniq_exonic_reads.[file-handle].bam.")
+
 	args = parser.parse_args()
+
+	# Create work_dir if not exists
+	if not os.path.exists(args.work_dir): os.makedirs(args.work_dir)
+
 	if args.command == "prepare-junctions":
 		if len(args.junctions) == len(args.names):
 			prepare_junction_lib(add_slash(args.work_dir), args.ccds, args.junctions, args.names, args.exitrons, args.min_support)
@@ -213,3 +300,8 @@ if __name__ == '__main__':
 		filter_exitrons(add_slash(args.work_dir), args.ccds, args.introns, args.junction_map, args.genome_fasta)
 	elif args.command == "prepare-bam":
 		prepare_bam_files(add_slash(args.work_dir), args.bam, args.file_handle, args.genome_fasta)
+	elif args.command == "calculate-PSI":
+		if all([ os.path.exists(args.exitron_map), os.path.exists(args.uniq_reads), os.path.exists(args.uniq_exonic) ]):
+			calculate_PSI(add_slash(args.work_dir), args.exitron_map, args.uniq_reads, args.uniq_exonic, args.file_handle)
+		else: 
+			sys.stderr.write("One (or multiple) input file could not be accessed.\n")
