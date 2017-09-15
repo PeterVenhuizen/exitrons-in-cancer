@@ -254,6 +254,8 @@ def calculate_PSI(work_dir, exitron_map, uniq_reads, uniq_exonic, handle):
 			except ZeroDivisionError: PSI = 'NA'
 			fout.write( '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(x, info[x]['t_id'], info[x]['strand'], info[x]['is_annotated'], info[x]['mod3'], rc[x]['A'], rc[x]['B'], rc[x]['C'], rc[x]['D'], PSI) )
 
+	# Clean up
+	subprocess.call( "rm -f {}tmp*".format(work_dir), shell=True )
 
 if __name__ == '__main__':
 
