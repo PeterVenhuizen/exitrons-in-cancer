@@ -18,10 +18,12 @@ from sequence import Sequence
 def add_slash(path):
 	return path if path.endswith('/') else path +'/'
 
-def get_shared_junctions(junc_files, min_support=3):
-	return set.intersection(*[ set([ (j['chr'], j['junc_start'], j['junc_end'], j['strand']) for j in yield_junctions(f) if j['depth'] >= min_support ]) for f in junc_files ])
+def get_shared_junctions(junc_files, min_support=3, source="TopHat2"):
+	
+	if source == "TopHat2":	return set.intersection(*[ set([ (j['chr'], j['junc_start'], j['junc_end'], j['strand']) for j in yield_junctions(f) if j['depth'] >= min_support ]) for f in junc_files ])
+	elif source == "HISAT2": return set.intersection(*[ set([ (j['chr'], j['start']+1, j['end'], j['strand']) for j in yield_junctions(f, source=source) ]) for f in junc_files ])
 
-def prepare_junction_lib(work_dir, ccds_gtf, junc_files, sample_names, exitron_bed=None, min_support=3):
+def prepare_junction_lib(work_dir, ccds_gtf, junc_files, sample_names, exitron_bed=None, min_support=3, source="TopHat2"):
 	
 	# Generate working directory
 	if not os.path.exists(work_dir): os.makedirs(work_dir)
@@ -31,7 +33,7 @@ def prepare_junction_lib(work_dir, ccds_gtf, junc_files, sample_names, exitron_b
 	uniq_names = set(sample_names)
 	for n in natsorted(uniq_names):
 		indices = [ i for i, x in enumerate(sample_names) if x == n ]
-		junction_sets.append( get_shared_junctions([ junc_files[i] for i in indices ], min_support) )
+		junction_sets.append( get_shared_junctions([ junc_files[i] for i in indices ], min_support, source) )
 	all_junctions = set.union(*junction_sets)
 
 	# Add existing exitrons when supplied
@@ -52,7 +54,7 @@ def prepare_junction_lib(work_dir, ccds_gtf, junc_files, sample_names, exitron_b
 	subprocess.call("intersectBed -s -f 1 -wa -wb -a {0}all_junctions.min_{1}_depth.bed -b {2} | awk -F\"\\t\" '{{ OFS=\"\t\"; print $1, $2, $3, $6, $10, $11, $NF }}' > {0}junctions_CCDS_map.tmp".format(work_dir, min_support, ccds_gtf), shell=True)
 
 	# Parse intersection
-	with open('{}junctions_CCDS_map.txt'.format(work_dir), 'w') as fout:
+	with open('{}junctions_CCDS_map.{}.txt'.format(work_dir, source), 'w') as fout:
 		fout.write('#CHR\tJUNCTION_START\tJUNCTION_END\tSTRAND\tTRANSCRIPT_ID\tCCDS_START\tCCDS_END\n')
 		for line in open('{}junctions_CCDS_map.tmp'.format(work_dir)):
 			c, j_start, j_end, strand, c_start, c_end, attributes = line.rstrip().split('\t')
@@ -85,7 +87,7 @@ def filter_exitrons(work_dir, ccds_gtf, introns_bed, junction_map, genome_fasta)
 			except KeyError: ccds[attr["transcript_id"]] = { "chr": c, "strand": strand, "exons": [[ int(start), int(end) ]] }
 	for t_id in ccds: ccds[t_id]['exons'].sort(key=lambda x: x[0])
 
-	with open('{}exitrons_CCDS_map.txt'.format(work_dir), 'w') as map_out:
+	with open(junction_map.replace('junctions', 'exitrons'), 'w') as map_out:
 		map_out.write( '#CHR\tEXITRON_START\tEXITRON_END\tSTRAND\tTRANSCRIPT_ID\tCCDS_START\tCCDS_END\tIS_ANNOTATED\tMOD3\n' )
 		for line in open(junction_map):
 			if not line.startswith('#'):
@@ -271,6 +273,7 @@ if __name__ == '__main__':
 	parser_a.add_argument('-n', '--names', required=True, nargs='+', help="List of condition names, e.g. N N N D D D.")
 	parser_a.add_argument('-e', '--exitrons', default=None, help="Existing exitron bed file.")
 	parser_a.add_argument('-m', '--min-support', type=int, default=3, help="Minimum required junction coverage depth.")
+	parser_a.add_argument('-s', '--source', choices=["TopHat2", "HISAT2"], default="TopHat2", help="Software used to generate the junctions.")
 
 	parser_b = subparsers.add_parser('filter-exitrons', help="Filter out intron retention events from the potential exitrons, based on the coding potential.")
 	parser_b.add_argument('-c', '--ccds', required=True, help="CCDS bed file.")
@@ -296,7 +299,7 @@ if __name__ == '__main__':
 
 	if args.command == "prepare-junctions":
 		if len(args.junctions) == len(args.names):
-			prepare_junction_lib(add_slash(args.work_dir), args.ccds, args.junctions, args.names, args.exitrons, args.min_support)
+			prepare_junction_lib(add_slash(args.work_dir), args.ccds, args.junctions, args.names, args.exitrons, args.min_support, args.source)
 		else: 
 			sys.stderr.write("The number of junction files (-j, --junctions) and sample names (-n, --names) should be the same! Quitting...")
 	elif args.command == "filter-exitrons":
