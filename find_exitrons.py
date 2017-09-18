@@ -49,20 +49,20 @@ def prepare_junction_lib(work_dir, ccds_gtf, junc_files, sample_names, exitron_b
 
 	# intersectBed -s -f 1 -wa -wb -a all_junctions.bed -b ccds_gtf
 	# -f 1 reports only 100% matches
-	subprocess.call("intersectBed -s -f 1 -wa -wb -a {0}all_junctions.min_{1}_depth.bed -b {2} | awk -F\"\\t\" '{{ OFS=\"\t\"; print $1, $2, $3, $10, $11, $NF }}' > {0}junctions_CCDS_map.tmp".format(work_dir, min_support, ccds_gtf), shell=True)
+	subprocess.call("intersectBed -s -f 1 -wa -wb -a {0}all_junctions.min_{1}_depth.bed -b {2} | awk -F\"\\t\" '{{ OFS=\"\t\"; print $1, $2, $3, $6, $10, $11, $NF }}' > {0}junctions_CCDS_map.tmp".format(work_dir, min_support, ccds_gtf), shell=True)
 
 	# Parse intersection
 	with open('{}junctions_CCDS_map.txt'.format(work_dir), 'w') as fout:
-		fout.write('#CHR\tJUNCTION_START\tJUNCTION_END\tTRANSCRIPT_ID\tCCDS_START\tCCDS_END\n')
+		fout.write('#CHR\tJUNCTION_START\tJUNCTION_END\tSTRAND\tTRANSCRIPT_ID\tCCDS_START\tCCDS_END\n')
 		for line in open('{}junctions_CCDS_map.tmp'.format(work_dir)):
-			c, j_start, j_end, c_start, c_end, attributes = line.rstrip().split('\t')
+			c, j_start, j_end, strand, c_start, c_end, attributes = line.rstrip().split('\t')
 			attr = {}
 			for a in attributes.split(';'):
 				if len(a):
 					attr_name, attr_value = a.split(' "')
 					attr[attr_name.strip()] = attr_value.replace('\"', '')
 
-			fout.write( '{}\t{}\t{}\t{}\t{}\t{}\n'.format(c, j_start, j_end, attr["transcript_id"], c_start, c_end) )
+			fout.write( '{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(c, j_start, j_end, strand, attr["transcript_id"], c_start, c_end) )
 	subprocess.call("rm -f {0}junctions_CCDS_map.tmp".format(work_dir), shell=True)
 
 def filter_exitrons(work_dir, ccds_gtf, introns_bed, junction_map, genome_fasta):
@@ -86,10 +86,10 @@ def filter_exitrons(work_dir, ccds_gtf, introns_bed, junction_map, genome_fasta)
 	for t_id in ccds: ccds[t_id]['exons'].sort(key=lambda x: x[0])
 
 	with open('{}exitrons_CCDS_map.txt'.format(work_dir), 'w') as map_out:
-		map_out.write( '#CHR\tEXITRON_START\tEXITRON_END\tTRANSCRIPT_ID\tCCDS_START\tCCDS_END\tIS_ANNOTATED\tMOD3\n' )
+		map_out.write( '#CHR\tEXITRON_START\tEXITRON_END\tSTRAND\tTRANSCRIPT_ID\tCCDS_START\tCCDS_END\tIS_ANNOTATED\tMOD3\n' )
 		for line in open(junction_map):
 			if not line.startswith('#'):
-				c, j_start, j_end, t_id, c_start, c_end = line.rstrip().split('\t')
+				c, j_start, j_end, strand, t_id, c_start, c_end = line.rstrip().split('\t')
 				j_start, j_end = int(j_start), int(j_end)
 				mod3 = abs(j_end-j_start) % 3
 
@@ -199,37 +199,37 @@ def calculate_PSI(work_dir, exitron_map, uniq_reads, uniq_exonic, handle):
     
     PSI = ( ((A+B+C)/3) / ((A+B+C)/3) + D ) * 100 '''
 
-    import re
+	import re
 
-    # Get junction support
-    rc, info = {}, {}
-    for line in open(exitron_map):
-    	if not line.startswith('#'):
+	# Get junction support
+	rc, info = {}, {}
+	for line in open(exitron_map):
+		if not line.startswith('#'):
 
-    		# CHR, EXITRON_START, EXITRON_END, TRANSCRIPT_ID, CCDS_START, CCDS_END, IS_ANNOTATED, MOD3
-    		c, s, e, strand, t_id, ccds_start, ccds_end, is_annotated, mod3 = line.rstrip().split('\t')
-    		info['{}:{}-{}'.format(c, s, e)] = { 'strand': strand, 't_id': t_id, 'is_annotated': is_annotated, 'mod3': mod3 }
+			# CHR, EXITRON_START, EXITRON_END, TRANSCRIPT_ID, CCDS_START, CCDS_END, IS_ANNOTATED, MOD3
+			c, s, e, strand, t_id, ccds_start, ccds_end, is_annotated, mod3 = line.rstrip().split('\t')
+			info['{}:{}-{}'.format(c, s, int(e)+1)] = { 'strand': strand, 't_id': t_id, 'is_annotated': is_annotated, 'mod3': mod3 }
 
-    		subprocess.call("samtools view {0}{1} {2}:{3}-{4} > {0}tmp.sam".format(work_dir, uniq_reads, c, s, e), shell=True)
-    		N = "{}N".format(int(e)-int(s)) # Get the required read/junction gap signature
+			subprocess.call("samtools view {0} {1}:{2}-{3} > {4}tmp.sam".format(uniq_reads, c, s, e, work_dir), shell=True)
+			N = "{}N".format(int(e)-int(s)) # Get the required read/junction gap signature
 
-    		uniq_count = 0
-    		for aln in open("{}tmp.sam".format(work_dir)):
-    			qname = aln.split('\t')[0]
-    			pos = int(aln.split('\t')[3])
-    			cigar = aln.split('\t')[5]
-    			start = (pos + int(re.search('^[0-9]+)M', cigar).group(1))) - 1
+			uniq_count = 0
+			for aln in open("{}tmp.sam".format(work_dir)):
+				qname = aln.split('\t')[0]
+				pos = int(aln.split('\t')[3])
+				cigar = aln.split('\t')[5]
+				start = (pos + int(re.search('^([0-9]+)M', cigar).group(1))) - 1
 
-    			# Check if the junction is at the correct position
-    			# and if the junction size is correct
-    			if N in cigar and start == int(s): uniq_count += 1
+				# Check if the junction is at the correct position
+				# and if the junction size is correct
+				if N in cigar and start == int(s): uniq_count += 1
 
-    		rc['{}:{}-{}'.format(c, s, e)+1] = { 'A': 0, 'B': 0, 'C': 0, 'D': uniq_count }
+			rc['{}:{}-{}'.format(c, s, int(e)+1)] = { 'A': 0, 'B': 0, 'C': 0, 'D': uniq_count }
 
-    # Get A, B, C read support
-    with open("{}tmp_coverageBed_input.bed", 'w') as fout:
-    	for line in open(exitron_map):
-    		if not line.startswith('#'):
+	# Get A, B, C read support
+	with open("{}tmp_coverageBed_input.bed".format(work_dir), 'w') as fout:
+		for line in open(exitron_map):
+			if not line.startswith('#'):
 
 				c, s, e, strand, t_id, ccds_start, ccds_end, is_annotated, mod3 = line.rstrip().split('\t')
 				s, e = int(s), int(e)
@@ -240,8 +240,8 @@ def calculate_PSI(work_dir, exitron_map, uniq_reads, uniq_exonic, handle):
 				fout.write( '{}\t{}\t{}\t{}_B\n'.format(c, middle_point-10, middle_point+10, locus) )
 				fout.write( '{}\t{}\t{}\t{}_C\n'.format(c, e-10, e+10, locus) )
 
-	subprocess.call("sort -k1,1 -k2,2n {0}tmp_coveragebed_input.bed > {0}tmp_coverageBed_input.sorted.bed".format(work_dir), shell=True)
-	subprocess.call("coverageBed -sorted -counts -a {0}tmp_coverageBed_input.sorted.bed -b {0}{1} > {0}tmp_coverageBed_output.bed".format(work_dir, uniq_exonic), shell=True)
+	subprocess.call("sort -k1,1 -k2,2n {0}tmp_coverageBed_input.bed > {0}tmp_coverageBed_input.sorted.bed".format(work_dir), shell=True)
+	subprocess.call("coverageBed -sorted -counts -a {0}tmp_coverageBed_input.sorted.bed -b {1} > {0}tmp_coverageBed_output.bed".format(work_dir, uniq_exonic), shell=True)
 	for line in open("{}tmp_coverageBed_output.bed".format(work_dir)):
 		c, start, end, locus, coverage = line.rstrip().split('\t')
 		locus, letter = locus.split('_')
@@ -249,6 +249,7 @@ def calculate_PSI(work_dir, exitron_map, uniq_reads, uniq_exonic, handle):
 
 	# Calculate PSI
 	with open("{}{}.PSI".format(work_dir, handle), 'w') as fout: 
+		fout.write( "#EXITRON_ID\tTRANSCRIPT_ID\tSTRAND\tIS_ANNOTATED\tMOD3\tA\tB\tC\tD\tPSI\n" )
 		for x in natsorted(rc):
 			try: PSI = ( ( ( rc[x]['A'] + rc[x]['B'] + rc[x]['C'] ) / 3 ) / ( ( ( rc[x]['A'] + rc[x]['B'] + rc[x]['C'] ) / 3 ) + rc[x]['D'] ) ) * 100
 			except ZeroDivisionError: PSI = 'NA'
