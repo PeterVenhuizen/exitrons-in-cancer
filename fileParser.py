@@ -145,7 +145,7 @@ def parse_GTF(f, select_feature="exon", t_id_attr="transcript_id", attr_sep=' "'
 			attr = {}
 			for a in attributes.split(';'):
 				if len(a):
-					attr_name, attr_value = a.split(attr_sep)
+					attr_name, attr_value = list(filter(None, a.split(' ')))
 					attr[attr_name.strip()] = attr_value.replace('\"', '')
 
 			if feature == select_feature:
@@ -210,6 +210,21 @@ def yield_junctions(f, source="TopHat2"):
 				'start': int(s),
 				'end': int(e),
 				'strand': strand
+				})
+
+	elif source == "STAR":
+		for line in open(f):
+			cols = line.rstrip().split('\t')
+			yield({
+				'chr': cols[0],
+				'start': cols[1],
+				'end': cols[2],
+				'strand': { '0': 'undefined', '1': '+', '2': '-' }[cols[3]],
+				'intron_motif': { '0': 'non-canonical', '1': 'GT-AG', '2': 'CT-AC', '3': 'GC-AG', '4': 'CT-GC', '5': 'AT-AC', '6': 'GT-AT' }[cols[4]],
+				'is_annotated': cols[5] == '1',
+				'uniq_reads': int(cols[6]),
+				'multimap_reads': int(cols[7]),
+				'max_overhang': int(cols[8])
 				})
 
 
