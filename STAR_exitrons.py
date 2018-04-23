@@ -151,7 +151,6 @@ def prepare_junction_lib(work_dir, ccds_gtf, files, exitron_bed=None, min_N=3):
 	# The assumption is that the junction file is called "star.SJ.out.tab"
 	junction_file_name = "star.SJ.out.tab"
 
-
 	# Parse the normal and tumor samples
 	normal, tumor = [], []
 	for line in open(files):
@@ -276,8 +275,8 @@ def prepare_bam_files(work_dir, bam_file, handle, genome_fasta):
 	""" Extract the unique reads and unique exonic reads from the 
 	supplied bam file, index and output to the working directory. """
 
-	# Extract unique reads
-	uniq_reads_bam = "{}uniq_reads.{}.bam".format(work_dir, handle)
+	# Extract unique junctions reads (ujr)
+	uniq_reads_bam = "{}ujr.{}.bam".format(work_dir, handle) 
 	cmd = "%s view %s | grep -w \"NH:i:1\" | perl -n -e '@line=split(/\\t/,$_); if ($line[5]=~/N/){ print \"$_\"; }' > %s" % (samtools_path, bam_file, uniq_reads_bam.replace('.bam', '.sam'))
 	subprocess.call(cmd, shell=True)
 
@@ -291,8 +290,8 @@ def prepare_bam_files(work_dir, bam_file, handle, genome_fasta):
 	# Remove sam
 	subprocess.call("rm -f {}".format(uniq_reads_bam.replace('.bam', '.sam')), shell=True)
 
-	# Extract unique exonic reads
-	uniq_exon_reads_bam = '{}uniq_exonic_reads.{}.bam'.format(work_dir, handle)
+	# Extract unique exonic reads (uer)
+	uniq_exon_reads_bam = '{}uer.{}.bam'.format(work_dir, handle)
 	cmd = "%s view %s | grep -w \"NH:i:1\" | perl -n -e '@line=split(/\\t/,$_); if ($line[5]!~/N/){ print \"$_\"; }' > %s" % (samtools_path, bam_file, uniq_exon_reads_bam.replace('.bam', '.sam'))
 	subprocess.call(cmd, shell=True)
 
@@ -305,6 +304,18 @@ def prepare_bam_files(work_dir, bam_file, handle, genome_fasta):
 
 	# Remove sam
 	subprocess.call("rm -f {}".format(uniq_exon_reads_bam.replace('.bam', '.sam')), shell=True)
+
+def prepare_multi_bam(work_dir, files, genome_fasta):
+	""" Loop through the samples in the file and 
+	prepare the bam files. The assumption is that the bam file 
+	is called star.Aligned.sortedByCoord.out.bam """
+
+	bam_file_name = "star.Aligned.sortedByCoord.out.bam"
+
+	for line in open(files):
+		sample_type, sample_path = line.rstrip().split('\t')
+		file_id = sample_path.split('/')[-1] if sample_path.split('/')[-1] != '' else sample_path.split('/')[-2]
+		prepare_bam_files(work_dir, sample_path+bam_file_name, file_id, genome_fasta)
 
 def calculate_PSI(work_dir, exitron_map, uniq_reads, uniq_exonic, handle):
 	''' Calculate exitron PSI values, based on the coverage of the 
@@ -395,6 +406,70 @@ def calculate_PSI(work_dir, exitron_map, uniq_reads, uniq_exonic, handle):
 	# Clean up
 	subprocess.call( "rm -f {}tmp*".format(work_dir), shell=True )
 
+def calculate_multi_PSI(work_dir, bam_dir, exitron_map, files):
+	""" Loop through the samples in the files file and 
+	calculate the PSI for all exitrons for each sample. """
+
+	for line in open(files):
+		sample_type, sample_path = line.rstrip().split('\t')
+		file_id = sample_path.split('/')[-1] if sample_path.split('/')[-1] != '' else sample_path.split('/')[-2]
+
+		ujr = "{}ujr.{}.bam".format(bam_dir, file_id)
+		uer = "{}uer.{}.bam".format(bam_dir, file_id)
+
+		calculate_PSI(work_dir, exitron_map, ujr, uer, sample_type+'.'+file_id)
+
+def parse_PSI(PSI_file):
+	""" Parse the PSI file. """
+
+	d = {}
+	for line in open(PSI_file):
+		try: 
+			ei_id, t_id, strand, is_annotated, mod3, A, B, C, D, PSI = line.rstrip().split('\t')
+			d[ei_id] = { 't_id': t_id, 'strand': strand, 'is_annotated': is_annotated, 'mod3': mod3, 'A': int(A), 'B': int(B), 'C': int(C), 'D': int(D), 'PSI': float(PSI) }
+		except ValueError: pass
+	return d
+
+def compare_exitrons(work_dir, normal_files, tumor_files):
+	""" Get the significantly changing exitrons. """
+
+	import numpy as np
+	from scipy.stats import ttest_ind
+	from statsmodels.sandbox.stats.multicomp import multipletests
+
+	# Get normal and tumor PSIs
+	normal = [ parse_PSI(f) for f in normal_files ]
+	tumor = [ parse_PSI(f) for f in tumor_files ]
+
+	# Do t-test
+	results = {}
+	for ei in normal[0]:
+		x = [ n[ei]['PSI'] for n in normal ]
+		y = [ t[ei]['PSI'] for t in tumor ]
+
+		results[ei] = { 'pval': ttest_ind(x, y)[1] }
+
+	# Get the order of the exitrons for fdr assignment
+	natsorted_ei = natsorted([ ei for ei in results ])
+
+	# Do FDR correction
+	p = np.array([ results[ei]['pval'] for ei in natsorted_ei ])
+	mask = np.isfinite(p)
+	pval_corrected = np.full(p.shape, np.nan)
+	pval_corrected[mask] = multipletests(p[mask], method='fdr_bh')[1]
+
+	with open("{}{}.sign.txt".format(work_dir, handle), 'w') as fout:
+		for x, ei in enumerate(natsorted_ei):
+			results[ei]['fdr'] = pval_corrected[x]
+
+			normal_mean = np.mean([ n[ei]['PSI'] for n in normal ])
+			tumor_mean = np.mean([ t[ei]['PSI'] for t in tumor ])
+			diff = tumor_mean - normal_mean
+			label = "NORMAL<TEST" if diff > 0 else "NORMAL>TEST"
+
+			if results[ei]['fdr'] < 0.05:
+				fout.write( '{}\t{}\t{:.3f}\t{:.3f}\t{:.3f}\t{:.9f}\t{}\n'.format(ei, normal[0][ei]['t_id'], normal_mean, tumor_mean, diff, results[ei]['fdr'], label) )
+
 if __name__ == '__main__':
 
 	parser = argparse.ArgumentParser(description=__doc__)
@@ -404,8 +479,6 @@ if __name__ == '__main__':
 
 	parser_a = subparsers.add_parser('prepare-junctions', help="Select all junction with minimal N (default = 3) occurences and map to the CCDS annotation.")
 	parser_a.add_argument('-c', '--ccds', required=True, help="CCDS gtf file.")
-	#parser_a.add_argument('-j', '--junctions', required=True, nargs='+', help="Junction bed (SJ.out.tab) files.")
-	#parser_a.add_argument('-n', '--names', required=True, nargs='+', help="List of condition names, e.g. N N N D D D.")
 	parser_a.add_argument('-f', '--files', required=True, help="Text file containing the sample type (tumor or normal) in the first column and the sample full directory path in the second column.")
 	parser_a.add_argument('-e', '--exitrons', default=None, help="Supplemental exitron bed file.")
 	parser_a.add_argument('--min-support', type=int, default=3, help="Minimum number of samples per condition in which a junction must occur.")
@@ -421,11 +494,24 @@ if __name__ == '__main__':
 	parser_c.add_argument('-f', '--file-handle', required=True, help="Unique file handle. The output files will be [work_dir]/uniq_reads.[file-handle].bam and [work_dir]/uniq_exonic_reads.[file-handle].bam.")
 	parser_c.add_argument('-g', '--genome-fasta', required=True, help="Genome fasta.")
 
+	parser_c2 = subparsers.add_parser('prepare-multi-bam', help="Build-in loop for preparing multiple bam files.")
+	parser_c2.add_argument('-f', '--files', required=True, help="Text file containing the sample type (tumor or normal) in the first column and the sample full directory path in the second column.")
+	parser_c2.add_argument('-g', '--genome-fasta', required=True, help="Genome fasta.")
+
 	parser_d = subparsers.add_parser('calculate-PSI', help="Calculate the exitron PSI.")
 	parser_d.add_argument('--exitron-map', required=True, help="Exitron mapping file (from filter-exitrons).")
 	parser_d.add_argument('--uniq-reads', required=True, help="Unique reads bam file (from prepare-bam).")
 	parser_d.add_argument('--uniq-exonic', required=True, help="Unique exonic reads bam file (from prepare-bam).")
 	parser_d.add_argument('-f', '--file-handle', required=True, help="Unique file handle. The output files will be [work_dir]/accepted_hits_uniq_reads.[file-handle].bam and [work-dir]/accepted_hits_uniq_exonic_reads.[file-handle].bam.")
+
+	parser_d2 = subparsers.add_parser('calculate-multi-PSI', help="Build-in loop for calculating the PSI for multiple files.")
+	parser_d2.add_argument('--bam-dir', required=True, help="Path to the prepared bam files.")
+	parser_d2.add_argument('--exitron-map', required=True, help="Exitron mapping file (from filter-exitrons).")
+	parser_d2.add_argument('-f', '--files', required=True, help="Text file containing the sample type (tumor or normal) in the first column and the sample full directory path in the second column.")
+
+	parser_e = subparser.add_parser('compare', help="Calculate significantly used exitrons.")
+	parser_e.add_argument('--normal', required=True, nargs='+', help="PSI files of normal files.")
+	parser_e.add_argument('--tumor', required=True, nargs='+', help="PSI files of tumor files.")
 
 	args = parser.parse_args()
 
@@ -433,10 +519,6 @@ if __name__ == '__main__':
 	if not os.path.exists(args.work_dir): os.makedirs(args.work_dir)
 
 	if args.command == "prepare-junctions":
-		#if len(args.junctions) == len(args.names):
-		#	prepare_junction_lib(add_slash(args.work_dir), args.ccds, args.junctions, args.names, args.exitrons, args.min_support)
-		#else:
-		#	sys.stderr.write("The number of junction files (-j, --junctions) must be equal to the number of sample names (-n, --names)!")
 		prepare_junction_lib(add_slash(args.work_dir), args.ccds, args.files, args.exitrons, args.min_support)
 
 	elif args.command == "filter-exitrons":
@@ -445,8 +527,17 @@ if __name__ == '__main__':
 	elif args.command == "prepare-bam":
 		prepare_bam_files(add_slash(args.work_dir), args.bam, args.file_handle, args.genome_fasta)
 
+	elif args.command == "prepare-multi-bam":
+		prepare_multi_bam(add_slash(args.work_dir), args.files, args.genome_fasta)
+
 	elif args.command == "calculate-PSI":
 		if all([ os.path.exists(args.exitron_map), os.path.exists(args.uniq_reads), os.path.exists(args.uniq_exonic) ]):
 			calculate_PSI(add_slash(args.work_dir), args.exitron_map, args.uniq_reads, args.uniq_exonic, args.file_handle)
 		else: 
 			sys.stderr.write("One (or multiple) input file could not be accessed.\n")
+
+	elif args.command == "calculate-multi-PSI":
+		calculate_multi_PSI(add_slash(args.work_dir), args.bam_dir, args.exitron_map, args.files)
+
+	elif args.command == "compare":
+		compare_exitrons(add_slash(args.work_dir), args.normal, args.tumor)
