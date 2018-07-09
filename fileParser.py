@@ -135,7 +135,7 @@ class parseFastQ(object):
 			
 		return tuple(record)
 
-def parse_GTF(f, select_feature="exon", t_id_attr="transcript_id", attr_sep=' "', get_introns=True):
+def parse_GTF(f, select_feature="exon", t_id_attr="transcript_id", get_introns=True):
 	""" Parse a GTF file. Select transcripts based on the t_id_attr. """
 
 	gtf = {}
