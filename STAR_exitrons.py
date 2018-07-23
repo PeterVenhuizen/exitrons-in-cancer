@@ -71,77 +71,6 @@ def yield_bed(f):
 			sys.exit()
 		yield(d)
 
-class Sequence(object):
-	def __init__(self, seq, seq_id="", start=0, end=0):
-		self.sequence = seq.upper()
-		self.id = seq_id
-		self.start = int(start)
-		self.end = int(end)
-
-	def get_length(self):
-		''' Return Sequence object length. '''
-		
-		if len(self.sequence) > 0:
-			length = len(self.sequence)
-		else:
-			length = (self.end-self.start)+1
-		
-		return length
-
-	def get_reverse_complement(self):
-		''' Get the reverse complement of the sequence. '''
-		
-		com_dict = { 'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A', 'U': 'A', 
-					'R': 'Y', 'Y': 'R', 'S': 'S', 'W': 'W', 'K': 'M', 
-					'M': 'K', 'B': 'V', 'D': 'H', 'H': 'D', 'V': 'B', 
-					'N': 'N' }
-		return ''.join([com_dict[self.sequence[-i]] for i in xrange(1, len(self.sequence)+1)])
-
-	def translate(self, frame=0):
-		''' Translate to protein '''
-		
-		seq = self.sequence.replace('U', 'T')
-		
-		aa_dict = { ("GCT", "GCC", "GCA", "GCG"): 'A', # Alanine (Ala/A)
-			("TGT", "TGC"): 'C', # Cysteine (Cys/C)
-			("GAT", "GAC"): 'D', # Aspartic acid (Asp/D)
-			("GAA", "GAG"): 'E', # Glumatic acid (Glu/E)
-			("TTT", "TTC"): 'F', # Phenylalanine (Phe/F)
-			("GGT", "GGC", "GGA", "GGG"): 'G', # Glycine (Gly/G)
-			("CAT", "CAC"): 'H', # Histidine (His/H)
-			("ATT", "ATC", "ATA"): 'I', # Isoleucine (Iso/I)
-			("AAA", "AAG"): 'K', # Lysine (Lys/K)
-			("TTA", "TTG", "CTT", "CTC", "CTA", "CTG"): 'L', # Leucine (Leu/L)
-			"ATG": 'M', # Methionine (Met/M) START
-			("AAT", "AAC"): 'N', # Asparagine (Asn/N)
-			("CCT", "CCC", "CCA", "CCG"): 'P', # Proline (Pro/P)
-			("CAA", "CAG"): 'Q', # Glutamine (Gln/Q)
-			("CGT", "CGA", "CGG", "CGC", "AGA", "AGG"): 'R', # Arginine (Arg/R)
-			("TCT", "TCC", "TCA", "TCG", "AGT", "AGC"): 'S', # Serine (Ser/S)
-			("ACT", "ACC", "ACA", "ACG"): 'T', # Threonine (Thr/T)
-			("GTT", "GTC", "GTA", "GTG"): 'V', # Valine (Val/V)
-			"TGG": 'W', # Tryptophan (Trp/W)
-			("TAT", "TAC"): 'Y', # Tyrosine (Tyr/Y)
-			("TAA", "TAG", "TGA"): '*' # Stop
-		}
-		
-		protein = []
-		for i in xrange(frame, self.get_length(), 3):
-			codon = seq[i:i+3]
-			if len(codon) == 3:
-				try: protein.append(next(v for k, v in aa_dict.items() if codon in k))
-				except StopIteration: protein.append('X')
-				codon = ''
-		
-		return ''.join(protein), codon
-
-	def get_base_content(self, chars):
-		''' Return the percentage of bases in the sequence. 
-		If the chars variable is set to 'gc', than the 
-		GC-content of the sequence is returned. '''
-		
-		return sum([self.sequence.count(char) for char in chars.upper()])/self.get_length()
-
 def get_shared_junctions(junc_files):
 
 	# Count the number of times a junctions has been found
@@ -154,50 +83,46 @@ def get_shared_junctions(junc_files):
 	#return set([ x for x in jN if jN[x] >= min_N ])
 	return jN
 
-def prepare_junction_lib(work_dir, ccds_gtf, files, exitron_bed=None, min_N=3):
+def map2CCDS(work_dir, ccds_gtf, files, min_N=3):
 
 	# The assumption is that the junction file is called "star.SJ.out.tab"
 	junction_file_name = "star.SJ.out.tab"
 
 	# Parse the normal and tumor samples
-	normal, tumor = [], []
+	normal, tumor, pairs = [], [], {}
 	for line in open(files):
-		if "tumor" in line: tumor.append(line.rstrip().split('\t')[1]+junction_file_name)
-		elif "normal" in line: normal.append(line.rstrip().split('\t')[1]+junction_file_name)
+
+		genotype, path = line.rstrip().split('\t')
+		case_id = path.split('/')[5]
+		sample_id = path.split('/')[8]
+
+		if genotype == "tumor": tumor.append(path+junction_file_name)
+		elif genotype == "normal": normal.append(path+junction_file_name)
+
+		if case_id not in pairs: pairs[case_id] = {}
+		pairs[case_id][genotype] = { "sample_id": sample_id, "junctions": { "{}:{}-{}:{}".format(j["chr"], j["start"], j["end"], j["strand"]): str(j["uniq_reads"]) for j in yield_junctions(path+junction_file_name) } }
 
 	normalJunctionCount = get_shared_junctions(normal)
 	tumorJunctionCount = get_shared_junctions(tumor)
 	all_junctions = set.union(*[ set([ x for x in normalJunctionCount if normalJunctionCount[x] >= min_N ]), set([ x for x in tumorJunctionCount if tumorJunctionCount[x] >= min_N ]) ])
-	#all_junctions = set.union(*[ get_shared_junctions(normal, min_N), get_shared_junctions(tumor, min_N) ])
-
-	# Add existing exitrons when supplied
-	try:
-		if os.path.isfile(exitron_bed):
-			existing_EI = set()
-			for line in open(exitron_bed):
-				if not line.startswith('#'):
-					c, start, end, strand = line.split('\t')[:4]
-					existing_EI.add( (c, int(start), int(end), strand))
-
-			all_junctions = all_junctions.union(existing_EI)
-	except TypeError as e: pass
 
 	# Output shared junctions
-	with open('{}all_junctions.N{}.bed'.format(work_dir, min_N), 'w') as fout:
+	with open("{}all_junctions.N{}.bed".format(work_dir, min_N), 'w') as fout:
 		for j in natsorted(all_junctions):
 			c, s, e, strand = j
 
 			# Skip junctions with an undefined strand
-			if strand in ['+', '-']: fout.write( '{}\t{}\t{}\tJUNCTION\t1000\t{}\n'.format(c, s, e, strand) )
+			if strand in ['+', '-']: fout.write( "{}\t{}\t{}\tJUNCTION\t1000\t{}\n".format(c, s, e, strand) )
 
-	# Match the junctions to CCDS exons
+	# Map junctions to the CCDS exons
 	# bedtools intersect -s -f 1 -wa -wb -a all_junctions.bed -b ccds_gtf
 	# -f 1 reports only 100% matches
 	subprocess.call("{0} intersect -s -f 1 -wa -wb -a {1}all_junctions.N{2}.bed -b {3} | awk -F\"\\t\" '{{ OFS=\"\t\"; print $1, $2, $3, $6, $10, $11, $NF }}' > {1}junctions_CCDS_map.tmp".format(bedtools_path, work_dir, min_N, ccds_gtf), shell=True)
 
-	# Parse intersection
-	with open("{}junctions_CCDS_map.txt".format(work_dir), 'w') as fout:
-		fout.write("#CHR\tJUNCTION_START\tJUNCTION_END\tSTRAND\tTRANSCRIPT_ID\tGENE_ID\tGENE_NAME\tCCDS_START\tCCDS_END\tFREQLABEL\n")
+	# Parse intersection, only output each exitron once
+	seen = set()
+	with open("{}exitrons_CCDS_map.txt".format(work_dir), 'w') as fout:
+		fout.write("#CHR\tEXITRON_START\tEXITRON_END\tSTRAND\tTRANSCRIPT_ID\tGENE_ID\tGENE_NAME\tCCDS_START\tCCDS_END\tEIx3\tFREQLABEL\n")
 		for line in open("{}junctions_CCDS_map.tmp".format(work_dir)):
 			j_chr, j_start, j_end, j_strand, ccds_start, ccds_end, attributes = line.rstrip().split('\t')
 			attr = {}
@@ -206,132 +131,33 @@ def prepare_junction_lib(work_dir, ccds_gtf, files, exitron_bed=None, min_N=3):
 					attr_name, attr_value = list(filter(None, a.split(' ')))
 					attr[attr_name.strip()] = attr_value.replace('\"', '')
 
-			label = "N{};T{}".format(normalJunctionCount[(j_chr, int(j_start), int(j_end), j_strand)], tumorJunctionCount[(j_chr, int(j_start), int(j_end), j_strand)])
-			fout.write( "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n".format(j_chr, j_start, j_end, j_strand, attr["transcript_id"], attr["gene_id"], attr["gene_name"], ccds_start, ccds_end, label) )
+			freqlabel = "N{};T{}".format(normalJunctionCount[(j_chr, int(j_start), int(j_end), j_strand)], tumorJunctionCount[(j_chr, int(j_start), int(j_end), j_strand)])
+			EIx3 = "yes" if (abs(int(j_end)-int(j_start))+1) % 3 == 0 else "no"
+
+			exitron_id = '{}:{}-{}:{}'.format(j_chr, j_start, j_end, j_strand)
+			if not exitron_id in seen:
+				fout.write( "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n".format(j_chr, j_start, j_end, j_strand, attr["transcript_id"], attr["gene_name"], ccds_start, ccds_end, EIx3, freqlabel) )
+				seen.add(exitron_id)
+
 	subprocess.call("rm -f {}junctions_CCDS_map.tmp".format(work_dir), shell=True)
 
-def filter_exitrons(work_dir, ccds_gtf, introns_bed, junction_map, genome_fasta):
-	
-	# Get all annotated introns
-	ann_introns = set([ (i['chr'], i['start'], i['end']) for i in yield_bed(introns_bed) ])
-
-	# Get the CCDS annotation
-	ccds = {}
-	for line in open(ccds_gtf):
-		if not line.startswith('#'):
-			c, source, feature, start, end, score, strand, frame, attributes = line.rstrip().split('\t')
-			attr = {}
-			for a in attributes.split(';'):
-				if len(a):
-					attr_name, attr_value = list(filter(None, a.split(' ')))
-					attr[attr_name.strip()] = attr_value.replace('\"', '')
-
-			try: ccds[attr["transcript_id"]]["exons"].append([ int(start), int(end) ])
-			except KeyError: ccds[attr["transcript_id"]] = { "chr": c, "strand": strand, "exons": [[ int(start), int(end) ]] }
-	for t_id in ccds: ccds[t_id]['exons'].sort(key=lambda x: x[0])
-
-	with open(junction_map.replace('junctions', 'exitrons'), 'w') as map_out:
-		map_out.write( '#CHR\tEXITRON_START\tEXITRON_END\tSTRAND\tTRANSCRIPT_ID\tGENE_ID\tGENE_NAME\tCCDS_START\tCCDS_END\tIS_ANNOTATED\tMOD3\n' )
-		for line in open(junction_map):
-			if not line.startswith('#'):
-				c, j_start, j_end, strand, t_id, g_id, g_name, c_start, c_end, freqlabel = line.rstrip().split('\t')
-				j_start, j_end = int(j_start), int(j_end)
-				mod3 = (abs(j_end-j_start)+1) % 3
-
-				if (c, j_start-1, j_end) in ann_introns:
-					
-					# Generate the spliced in bed file
-					with open("{}tmp_spliced_in.bed".format(work_dir), 'w') as fout:
-						for s, e in ccds[t_id]["exons"]:
-							fout.write( '{}\t{}\t{}\n'.format(c, s-1, e) )
-
-					# Generate exitrons spliced out bed file
-					with open("{}tmp_spliced_out.bed".format(work_dir), 'w') as fout:
-						for s, e in ccds[t_id]["exons"]:
-							if s <= j_start <= e and s <= j_end <= e:
-								fout.write( '{}\t{}\t{}\n'.format(c, s-1, j_start-1) )
-								fout.write( '{}\t{}\t{}\n'.format(c, j_end, e) )
-							else:
-								fout.write( '{}\t{}\t{}\n'.format(c, s-1, e) )
-
-					# Get sequences
-					subprocess.call("{0} getfasta -fi {1} -bed {2}tmp_spliced_in.bed -fo {2}tmp_spliced_in.fa".format(bedtools_path, genome_fasta, work_dir), shell=True)
-					subprocess.call("{0} getfasta -fi {1} -bed {2}tmp_spliced_out.bed -fo {2}tmp_spliced_out.fa".format(bedtools_path, genome_fasta, work_dir), shell=True)
-					i = ''.join([ record.seq for record in yield_fasta("{}tmp_spliced_in.fa".format(work_dir)) ])
-					o = ''.join([ record.seq for record in yield_fasta("{}tmp_spliced_out.fa".format(work_dir)) ])
-
-					# Get reverse complement if necessary
-					if ccds[t_id]['strand'] == '-':
-						i = Sequence(i).get_reverse_complement()
-						o = Sequence(o).get_reverse_complement()
-
-					# Get the protein sequences
-					inProtein, in_leftover = Sequence(i).translate()
-					inProtein = inProtein[:inProtein.index('*')] if '*' in inProtein else inProtein[::]
-
-					outProtein, out_leftover = Sequence(o).translate()
-					outProtein = outProtein[:outProtein.index('*')] if '*' in outProtein else outProtein[::]
-
-					# Check if the exitron containing protein (i.e. spliced in variant)
-					# is at least of the same length, or longer, than the spliced out
-					# variant and that the stop codon is at the same, or on a later 
-					# position as with the spliced out variant. 
-					keep = False
-
-					if len(inProtein) >= len(outProtein):
-						if len(inProtein) == len(outProtein) + (abs(j_end-j_start)+1)/3 + len(out_leftover): keep = True
-
-					if keep:
-						map_out.write( '{}\tyes\t{}\n'.format(line.rstrip(), mod3) )
-
-				else: 
-					map_out.write( '{}\tno\t{}\n'.format(line.rstrip(), mod3) )
-
-	subprocess.call("rm -f {}tmp_spliced*".format(work_dir), shell=True)
-
-def get_exitron_origins(work_dir, exitron_map, files):
-	
-	# The assumption is that the junction file is called "star.SJ.out.tab"
-	junction_file_name = "star.SJ.out.tab"
-
-	EI = {}
-	for line in open(exitron_map):
-		if not line.startswith('#'):
-			EI['{}:{}-{}:{}'.format(*line.split('\t')[:4])] = line.split('\t')[-2]
-
-	# Parse the normal and tumor samples
-	pairs = {}
-	for line in open(files):
-		genotype, path = line.rstrip().split('\t')
-		case_id = path.split('/')[5]
-		sample_id = path.split('/')[8]
-
-		if case_id not in pairs: pairs[case_id] = {}
-		pairs[case_id][genotype] = { 'sample_id': sample_id, 'junctions': { '{}:{}-{}:{}'.format(j['chr'], j['start'], j['end'], j['strand']): str(j['uniq_reads']) for j in yield_junctions(path+junction_file_name) } }
-
-	with open('{}exitrons_origins.txt'.format(work_dir), 'w') as fout:
-		fout.write( '\t\t'+'\t'.join([ case_id+'\t' for case_id in natsorted(pairs) ])+'\n' )
-		fout.write( '\t\t'+'\t'.join([ '{}\t{}'.format(pairs[case_id]['normal']['sample_id'], pairs[case_id]['tumor']['sample_id']) for case_id in natsorted(pairs) ])+'\n' )
-		fout.write( 'exitron_id\tis_annotated\t'+'\t'.join([ 'normal\ttumor' for i in xrange(len(pairs)) ])+'\tN normal\tN tumor\n' )
-		for exitron in natsorted(EI):
-			line = [exitron, EI[exitron]]
-			N_normal, N_tumor = 0, 0
+	# Output the exitron origins
+	with open("{}exitrons_origin.txt".format(work_dir), 'w') as fout:
+		fout.write('\t'+'\t'.join([ case_id+'\t' for case_id in natsorted(pairs) ])+'\n')
+		fout.write('\t'+'\t'.join([ "{}\t{}".format(pairs[case_id]["normal"]["sample_id"], pairs[case_id]["tumor"]["sample_id"]) for case_id in natsorted(pairs) ])+'\n')
+		for exitron in natsorted(seen):
+			line = [exitron]
 			for case_id in natsorted(pairs):
-				
+
 				# Normal
-				try: 
-					line.append(pairs[case_id]['normal']['junctions'][exitron])
-					N_normal += 1
+				try: line.append(pairs[case_id]["normal"]["junctions"][exitron])
 				except KeyError: line.append('0')
 
 				# Tumor
-				try:
-					line.append(pairs[case_id]['tumor']['junctions'][exitron])
-					N_tumor += 1
-				except KeyError: line.append('0')
+				try: line.append(pairs[case_id]["tumor"]["junctions"][exitron])
+				except KeyError: line.append("0")
 
-			warning = "WARNING" if line[1] == "no" and all([ N_normal < 3, N_tumor < 3 ]) else "OKAY"
-			fout.write( '{}\t{}\t{}\t{}\n'.format('\t'.join(line), N_normal, N_tumor, warning) )
+			fout.write( '\t'.join(line)+'\n' )
 
 def prepare_bam_files(work_dir, bam_file, handle, genome_fasta):
 	""" Extract the unique reads and unique exonic reads from the 
