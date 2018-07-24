@@ -12,6 +12,7 @@ import argparse
 import subprocess
 import sys
 import os
+import numpy as np
 
 samtools_path = "/home/venhuip8/Apps/samtools-1.5/bin/samtools"
 bedtools_path = "/usr/local/bin/bedtools"
@@ -205,6 +206,46 @@ def prepare_multi_bam(work_dir, files, genome_fasta):
 		file_id = sample_path.split('/')[-1] if sample_path.split('/')[-1] != '' else sample_path.split('/')[-2]
 		prepare_bam_files(work_dir, sample_path+bam_file_name, file_id, genome_fasta)
 
+def quality_score(A, B, C, D):
+	""" Score the exitron based on the number of reads """
+
+	if D >= 100 or A >= 100 and C >= 100: QS = "SOK"
+	elif D >= 20 or any([ A >= 20 and C >= 15, A >= 15 and C >= 20 ]): QS = "OK"
+	elif D >= 15 or any([ A >= 15 and C >= 10, A >= 10 and C >= 15 ]): QS = "LOW"
+	elif D >= 10 or any([ A >= 10 and C >= 5, A >= 5 and C >= 10 ]): QS = "VLOW"
+	else: QS = "N"
+
+	''' 
+		Filter EI events based on (median) read coverage and read balance. 
+		The goal of the binomial test (balance) was to exclude events in which there is a 
+		high imbalance in read counts among the two exon-intron junctions and the intron 
+		body sequence. Such imbalances can arise from neighboring alternative 5' and/or 3'
+		splice sites or overlapping genes, confound PSI estimates, and lead to the false 
+		detection of EI.
+
+		p-value (binomial{ 	M = min(A, B, C),
+							N = min(A, B, C) + max(A, B, C),
+							P = 1/3.5,
+							alternative = lower })
+
+		M = number of successes
+		N = number of trials
+		P = probability of success
+
+		scipy.stats.binom_test(M, N, 1/3.5, alternative="less") 
+	'''
+
+	if ( np.median([ A, B, C ]) + D > 10 ) and \
+	binom_test(
+		min(A, B, C),
+		min(A, B, C) + max(A, B, C),
+		1/3.5,
+		alternative="less"
+	) >= 0.05: balance = "OKAY"
+	else: balance = "NOT_OKAY"
+
+	return QS, balance
+
 def calculate_PSI(work_dir, exitron_map, uniq_reads, uniq_exonic, handle):
 	''' Calculate exitron PSI values, based on the coverage of the 
 	unique exonic reads. 
@@ -226,6 +267,7 @@ def calculate_PSI(work_dir, exitron_map, uniq_reads, uniq_exonic, handle):
     PSI = ( ((A+B+C)/3) / ((A+B+C)/3) + D ) * 100 '''
 
 	import re
+	from scipy.stats import binom_test
 
     # Get junction support
 	rc, info = {}, {}
@@ -288,11 +330,14 @@ def calculate_PSI(work_dir, exitron_map, uniq_reads, uniq_exonic, handle):
 
 	# Calculate PSI
 	with open("{}{}.PSI".format(work_dir, handle), 'w') as fout:
-		fout.write( "EXITRON_ID\tTRANSCRIPT_ID\tGENE_ID\tGENE_NAME\tSTRAND\tEIx3\tA\tB\tC\tD\tPSI\n" )
+		fout.write( "EXITRON_ID\tTRANSCRIPT_ID\tGENE_ID\tGENE_NAME\tSTRAND\tEIx3\tA\tB\tC\tD\tPSI\tQUALITY_SCORE\tREAD_BALANCE\n" )
 		for x in natsorted(rc):
 			try: PSI = ( ( ( rc[x]['A'] + rc[x]['B'] + rc[x]['C'] ) / 3 ) / ( ( ( rc[x]['A'] + rc[x]['B'] + rc[x]['C'] ) / 3 ) + rc[x]['D'] ) ) * 100
 			except ZeroDivisionError: PSI = 'NA'
-			fout.write( '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(x, info[x]['t_id'], info[x]['g_id'], info[x]['gene_name'], info[x]['strand'], info[x]['EIx3'], rc[x]['A'], rc[x]['B'], rc[x]['C'], rc[x]['D'], PSI) )
+
+			qs, read_balance = quality_score(rc[x]['A'], rc[x]['B'], rc[x]['C'], rc[x]['D'])
+
+			fout.write( '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(x, info[x]['t_id'], info[x]['g_id'], info[x]['gene_name'], info[x]['strand'], info[x]['EIx3'], rc[x]['A'], rc[x]['B'], rc[x]['C'], rc[x]['D'], PSI, qs, read_balance ) )
 
 	# Clean up
 	subprocess.call( "rm -f {}tmp*".format(work_dir), shell=True )
@@ -368,7 +413,6 @@ def compare_exitrons(work_dir, files_file, psi_files, handle):
 	""" Get the significantly changing exitrons based on 
 	paired t-tests. """
 
-	import numpy as np
 	from scipy.stats import ttest_rel
 	from statsmodels.sandbox.stats.multicomp import multipletests
 
