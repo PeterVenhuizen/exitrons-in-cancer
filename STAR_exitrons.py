@@ -136,7 +136,7 @@ def map2CCDS(work_dir, ccds_gtf, files, min_N=3):
 
 			exitron_id = '{}:{}-{}:{}'.format(j_chr, j_start, j_end, j_strand)
 			if not exitron_id in seen:
-				fout.write( "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n".format(j_chr, j_start, j_end, j_strand, attr["transcript_id"], attr["gene_name"], ccds_start, ccds_end, EIx3, freqlabel) )
+				fout.write( "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n".format(j_chr, j_start, j_end, j_strand, attr["transcript_id"], attr["gene_id"], attr["gene_name"], ccds_start, ccds_end, EIx3, freqlabel) )
 				seen.add(exitron_id)
 
 	subprocess.call("rm -f {}junctions_CCDS_map.tmp".format(work_dir), shell=True)
@@ -232,9 +232,9 @@ def calculate_PSI(work_dir, exitron_map, uniq_reads, uniq_exonic, handle):
 	for line in open(exitron_map):
 		if not line.startswith('#'):
 
-			# CHR, EXITRON_START, EXITRON_END, TRANSCRIPT_ID, GENE_ID, GENE_SYMBOL, CCDS_START, CCDS_END, FREQLABEL, IS_ANNOTATED, MOD3
-			c, s, e, strand, t_id, g_id, g_name, ccds_start, ccds_end, freqlabel, is_annotated, mod3 = line.rstrip().split('\t')
-			info['{}:{}-{}'.format(c, s, int(e)+1)] = { 'strand': strand, 't_id': t_id, 'g_id': g_id, 'gene_name': g_name, 'is_annotated': is_annotated, 'mod3': mod3 }
+			# CHR, EXITRON_START, EXITRON_END, TRANSCRIPT_ID, GENE_ID, GENE_SYMBOL, CCDS_START, CCDS_END, EIx3, FREQLABEL
+			c, s, e, strand, t_id, g_id, g_name, ccds_start, ccds_end, EIx3, freqlabel = line.rstrip().split('\t')
+			info['{}:{}-{}'.format(c, s, int(e)+1)] = { 'strand': strand, 't_id': t_id, 'g_id': g_id, 'gene_name': g_name, 'freqlabel': freqlabel, 'EIx3': EIx3 }
 			#c, s, e, j_id, score, strand = line.rstrip().split('\t')
 			#info['{}:{}-{}'.format(c, s, int(e)+1)] = { 'strand': strand }
 
@@ -261,7 +261,7 @@ def calculate_PSI(work_dir, exitron_map, uniq_reads, uniq_exonic, handle):
 		for line in open(exitron_map):
 			if not line.startswith('#'):
 
-				c, s, e, strand, t_id, g_id, g_name, ccds_start, ccds_end, freqlabel, is_annotated, mod3 = line.rstrip().split('\t')
+				c, s, e, strand, t_id, g_id, g_name, ccds_start, ccds_end, EIx3, freqlabel = line.rstrip().split('\t')
 
 				if (c, s, e, strand) not in all_the_single_ladies:
 
@@ -288,11 +288,11 @@ def calculate_PSI(work_dir, exitron_map, uniq_reads, uniq_exonic, handle):
 
 	# Calculate PSI
 	with open("{}{}.PSI".format(work_dir, handle), 'w') as fout:
-		fout.write( "EXITRON_ID\tTRANSCRIPT_ID\tGENE_ID\tGENE_NAME\tSTRAND\tIS_ANNOTATED\tMOD3\tA\tB\tC\tD\tPSI\n" )
+		fout.write( "EXITRON_ID\tTRANSCRIPT_ID\tGENE_ID\tGENE_NAME\tSTRAND\tEIx3\tA\tB\tC\tD\tPSI\n" )
 		for x in natsorted(rc):
 			try: PSI = ( ( ( rc[x]['A'] + rc[x]['B'] + rc[x]['C'] ) / 3 ) / ( ( ( rc[x]['A'] + rc[x]['B'] + rc[x]['C'] ) / 3 ) + rc[x]['D'] ) ) * 100
 			except ZeroDivisionError: PSI = 'NA'
-			fout.write( '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(x, info[x]['t_id'], info[x]['g_id'], info[x]['gene_name'], info[x]['strand'], info[x]['is_annotated'], info[x]['mod3'], rc[x]['A'], rc[x]['B'], rc[x]['C'], rc[x]['D'], PSI) )
+			fout.write( '{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(x, info[x]['t_id'], info[x]['g_id'], info[x]['gene_name'], info[x]['strand'], info[x]['EIx3'], rc[x]['A'], rc[x]['B'], rc[x]['C'], rc[x]['D'], PSI) )
 
 	# Clean up
 	subprocess.call( "rm -f {}tmp*".format(work_dir), shell=True )
@@ -412,21 +412,10 @@ if __name__ == '__main__':
 
 	subparsers = parser.add_subparsers(dest='command', help="sub-command help.")
 
-	parser_a = subparsers.add_parser('prepare-junctions', help="Select all junction with minimal N (default = 3) occurences and map to the CCDS annotation.")
+	parser_a = subparsers.add_parser('map-junctions', help="Map all junctions with minimal N (default = 3) occurences to the CCDS annotation.")
 	parser_a.add_argument('-c', '--ccds', required=True, help="CCDS gtf file.")
 	parser_a.add_argument('-f', '--files', required=True, help="Text file containing the sample type (tumor or normal) in the first column and the sample full directory path in the second column.")
-	parser_a.add_argument('-e', '--exitrons', default=None, help="Supplemental exitron bed file.")
 	parser_a.add_argument('--min-support', type=int, default=3, help="Minimum number of samples per condition in which a junction must occur.")
-
-	parser_b = subparsers.add_parser('filter-exitrons', help="Filter out intron retention events from the potential exitrons, based on the coding potential.")
-	parser_b.add_argument('-c', '--ccds', required=True, help="CCDS bed file.")
-	parser_b.add_argument('-i', '--introns', required=True, help="Transcriptome introns bed file.")
-	parser_b.add_argument('-j', '--junction-map', required=True, help="Junction map file (from prepare-junctions).")
-	parser_b.add_argument('-g', '--genome-fasta', required=True, help="Genome fasta.")
-
-	parser_x = subparsers.add_parser('exitron-origin', help="Extract the STAR unique read coverage for each exitron in all samples.")
-	parser_x.add_argument('--exitron-map', required=True, help="Exitron mapping file (from filter-exitrons).")
-	parser_x.add_argument('-f', '--files', required=True, help="Text file containing the sample type (tumor or normal) in the first column and the sample full directory path in the second column.")
 
 	parser_c = subparsers.add_parser('prepare-bam', help="Extract the unique (exonic) reads from the alignment bam file.")
 	parser_c.add_argument('-b', '--bam', required=True, help="Bam alignment file.")
@@ -459,14 +448,8 @@ if __name__ == '__main__':
 	work_dir = add_slash(args.work_dir)
 	if not os.path.exists(work_dir): os.makedirs(work_dir)
 
-	if args.command == "prepare-junctions":
-		prepare_junction_lib(work_dir, args.ccds, args.files, args.exitrons, args.min_support)
-
-	elif args.command == "filter-exitrons":
-		filter_exitrons(work_dir, args.ccds, args.introns, args.junction_map, args.genome_fasta)
-
-	elif args.command == "exitron-origin":
-		get_exitron_origins(work_dir, args.exitron_map, args.files)
+	if args.command == "map-junctions":
+		map2CCDS(work_dir, args.ccds, args.files, args.min_support)
 
 	elif args.command == "prepare-bam":
 		prepare_bam_files(work_dir, args.bam, args.file_handle, args.genome_fasta)
