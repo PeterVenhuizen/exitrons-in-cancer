@@ -209,6 +209,8 @@ def prepare_multi_bam(work_dir, files, genome_fasta):
 def quality_score(A, B, C, D):
 	""" Score the exitron based on the number of reads """
 
+	from scipy.stats import binom_test
+
 	if D >= 100 or A >= 100 and C >= 100: QS = "SOK"
 	elif D >= 20 or any([ A >= 20 and C >= 15, A >= 15 and C >= 20 ]): QS = "OK"
 	elif D >= 15 or any([ A >= 15 and C >= 10, A >= 10 and C >= 15 ]): QS = "LOW"
@@ -267,7 +269,6 @@ def calculate_PSI(work_dir, exitron_map, uniq_reads, uniq_exonic, handle):
     PSI = ( ((A+B+C)/3) / ((A+B+C)/3) + D ) * 100 '''
 
 	import re
-	from scipy.stats import binom_test
 
     # Get junction support
 	rc, info = {}, {}
@@ -355,61 +356,69 @@ def calculate_multi_PSI(work_dir, bam_dir, exitron_map, files):
 
 		calculate_PSI(work_dir, exitron_map, ujr, uer, sample_type+'.'+file_id)
 
-def parse_paired_PSI(files_file, psi_files):
+def parse_PSI(f, readQC = ['VLOW', 'LOW', 'OK', 'SOK']):
+	
+	psi = {}
+	for line in open(f):
+		cols = line.rstrip().split('\t')
+		exitron_id = '{}:{}'.format(cols[0], cols[4])
+		try: 
+			psi[exitron_id] = { 
+				't_id': cols[1],
+				'g_id': cols[2],
+				'gene_name': cols[3],
+				'EIx3': cols[5],
+				'PSI': float(cols[10]) if cols[10] != "NA" and cols[11] in readQC else float('nan')
+			}
+		except ValueError: pass
+	return psi
 
+def get_paired_PSI(work_dir, files_file, psi_dir):
+	
 	from math import isnan
 
-	f2c, samples = {}, {}
+	pairs = {}
 	for line in open(files_file):
 		genotype, path = line.rstrip().split('\t')
 		case_id = path.split('/')[5]
-		file_id = path.split('/')[8]
+		sample_id = path.split('/')[8]
 
-		f2c[file_id] = { 'case_id': case_id, 'genotype': genotype }
+		if case_id not in pairs: pairs[case_id] = {}
+		pairs[case_id][genotype] = { "sample_id": sample_id, "PSI": parse_PSI("{}{}.{}.PSI".format(psi_dir, genotype, sample_id)) }
 
-	for f in psi_files:
+	paired_values = {}
+	rndm_case = [ c for c in pairs ][0]
+	with open(work_dir+"paired_PSI.txt", 'w') as fout:
+		fout.write( '\t'+'\t'.join([ case_id+'\t' for case_id in natsorted(pairs) ]) + '\n' )
+		fout.write( '\t'+'\t'.join([ "{}\t{}".format(pairs[case_id]["normal"]["sample_id"], pairs[case_id]["tumor"]["sample_id"]) for case_id in natsorted(pairs) ]) + '\n' )
+		
+		for EI in natsorted(pairs[rndm_case]["normal"]["PSI"]):
 
-		file_id = f.split('/')[-1].split('.')[1]
-		case_id, genotype = [ f2c[file_id][x] for x in ['case_id', 'genotype'] ]
-		if case_id not in samples: samples[case_id] = {}
+			line = [EI]
+			for case_id in natsorted(pairs):
+			
+				t_id, g_id, gene_name, EIx3 = [ pairs[case_id]["normal"]["PSI"][EI][key] for key in [ "t_id", "g_id", "gene_name", "EIx3" ] ]
+				n_PSI = pairs[case_id]["normal"]["PSI"][EI]["PSI"]
+				t_PSI = pairs[case_id]["tumor"]["PSI"][EI]["PSI"]
 
-		for line in open(f):
-			try:
-				exitron_ID, t_id, g_id, gene_name, strand = line.split('\t')[:5]
-				exitron_ID = '{}:{}'.format(exitron_ID, strand)
-				PSI = float(line.rstrip().split('\t')[-1]) if line.rstrip().split('\t')[-1] != "NA" else float('nan')
+				line.append(str(n_PSI))
+				line.append(str(t_PSI))
 
-				if exitron_ID not in samples[case_id]:
-					samples[case_id][exitron_ID] = {
-						't_id': t_id,
-						'g_id': g_id,
-						'gene_name': gene_name,
-						'normal': None,
-						'tumor': None
-					}
-				samples[case_id][exitron_ID][genotype] = PSI
-			except ValueError: pass
+				# Get pairs in which both normal and tumor are expressed
+				if EI not in paired_values:
+					paired_values[EI] = { "t_id": t_id, "g_id": g_id, "gene_name": gene_name, "EIx3": EIx3, "normal": [], "tumor": [] }
 
-	psi_values = {}
-	for case_id in samples:
-		for exitron_ID in samples[case_id]:
-			t_id, g_id, gene_name, n_PSI, t_PSI = [samples[case_id][exitron_ID][x] for x in ['t_id', 'g_id', 'gene_name', 'normal', 'tumor']]
-			try:
-				try:
-					if all([ not isnan(n_PSI), not isnan(t_PSI) ]):
-						psi_values[exitron_ID]['normal'].append(n_PSI)
-						psi_values[exitron_ID]['tumor'].append(t_PSI)
-					else:
-						# No coverage for one or both genotypes
-						pass
-				except TypeError: pass
-			except KeyError: 
-				if all([ not isnan(n_PSI), not isnan(t_PSI) ]):
-					psi_values[exitron_ID] = { 't_id': t_id, 'g_id': g_id, 'gene_name': gene_name, 'normal': [n_PSI], 'tumor': [t_PSI] }
+				if not isnan(n_PSI) and not isnan(t_PSI):
+					paired_values[EI]["normal"].append(n_PSI)
+					paired_values[EI]["tumor"].append(t_PSI)
 
-	return psi_values
+			# Output to file
+			fout.write( '\t'.join(line)+'\n' )
 
-def compare_exitrons(work_dir, files_file, psi_files, handle):
+	# Return proper pairs
+	return paired_values
+
+def compare_exitrons(work_dir, files_file, psi_dir, handle):
 	""" Get the significantly changing exitrons based on 
 	paired t-tests. """
 
@@ -417,7 +426,7 @@ def compare_exitrons(work_dir, files_file, psi_files, handle):
 	from statsmodels.sandbox.stats.multicomp import multipletests
 
 	# Get the paired normal and tumor PSIs
-	psi_values = parse_paired_PSI(files_file, psi_files)
+	psi_values = get_paired_PSI(work_dir, files_file, psi_dir)
 
 	# Do paired t-test
 	results = {}
@@ -435,19 +444,28 @@ def compare_exitrons(work_dir, files_file, psi_files, handle):
 	pval_corrected[mask] = multipletests(p[mask], method='fdr_bh')[1]
 
 	with open("{}{}.sign.txt".format(work_dir, handle), 'w') as fout:
-		for x, ei in enumerate(natsorted_ei):
-			results[ei]['fdr'] = pval_corrected[x]
+		fout.write('#EXITRON_ID\tEIx3\tTRANSCRIPT_ID\tGENE_ID\tGENE_SYMBOL\tNORMAL_MEAN\tTUMOR_MEAN\tDIFF\tPVALUE\tFDR\tLABEL\n')
+		for i, ei in enumerate(natsorted_ei):
+			results[ei]['fdr'] = pval_corrected[i]
 
-			normal_mean = np.nanmean( psi_values[ei]['normal'] )
-			tumor_mean = np.nanmean( psi_values[ei]['tumor'] )
-			
-			# Direction of change label
-			diff = tumor_mean - normal_mean
+			diff = np.mean([ psi_values[ei]['tumor'][j]-psi_values[ei]['normal'][j] for j in xrange(len(psi_values[ei]['normal'])) ])
 			if diff == 0: label = "NORMAL=TUMOR"
 			elif diff > 0: label = "NORMAL<TUMOR"
 			else: label = "NORMAL>TUMOR"
 
-			fout.write( '{}\t{}\t{}\t{}\t{}\t{:.3f}\t{:.3f}\t{:.3f}\t{:.9f}\t{:.9f}\t{}\n'.format(ei, len(psi_values[ei]['normal']), psi_values[ei]['t_id'], psi_values[ei]['g_id'], psi_values[ei]['gene_name'], normal_mean, tumor_mean, diff, results[ei]['pval'], results[ei]['fdr'], label) )
+			fout.write( "{}\t{}\t{}\t{}\t{}\t{:.3f}\t{:.3f}\t{:.3f}\t{:.9f}\t{:.9f}\t{}\n".format(
+				ei,
+				psi_values[ei]['EIx3'],
+				psi_values[ei]['t_id'],
+				psi_values[ei]['g_id'],
+				psi_values[ei]['gene_name'],
+				np.mean(psi_values[ei]['normal']),
+				np.mean(psi_values[ei]['tumor']),
+				diff,
+				results[ei]['pval'],
+				results[ei]['fdr'], 
+				label) 
+			)
 
 if __name__ == '__main__':
 
@@ -483,7 +501,7 @@ if __name__ == '__main__':
 
 	parser_e = subparsers.add_parser('compare', help="Calculate significantly used exitrons.")
 	parser_e.add_argument('--files', required=True, help="Text file containing the sample type (tumor or normal) in the first column and the sample full directory path in the second column.")
-	parser_e.add_argument('--psi', required=True, nargs='+', help="All PSI files.")
+	parser_e.add_argument('--psi-dir', required=True, help="PSI files directory.")
 	parser_e.add_argument('--file-handle', required=True, help="Unique file handle to use in the output file name.")
 
 	args = parser.parse_args()
@@ -511,4 +529,4 @@ if __name__ == '__main__':
 		calculate_multi_PSI(work_dir, args.bam_dir, args.exitron_map, args.files)
 
 	elif args.command == "compare":
-		compare_exitrons(work_dir, args.files, args.psi, args.file_handle)
+		compare_exitrons(work_dir, args.files, args.psi_dir, args.file_handle)
